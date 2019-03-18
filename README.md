@@ -1,2 +1,2 @@
 # kaggle
-things I done on kaggle
+I will periodically update this repo with code from Kaggle projects
