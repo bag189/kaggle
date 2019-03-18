@@ -1,0 +1,816 @@
+title: Exploring NFL 3rd Down Playcalling Trends and Predicting Conversion
+author: bag189
+date: "August 2018"
+output: html_document
+---
+
+
+#Introduction
+
+The goal of this notebook is to manipulate  the NFL play-by-play data develop a dataset that is geared towards explorting playcalling trends to inform prediction model(s) that could help inform (pre-snap) the offensive playcaller on whether their playcall will result into a 1st down conversion on 3rd down (aka 3rd Down Conversions). One common axiom in football is a team that converts on 3rd down probably wins the game because it keeps your offense on the field and the other offense off the field, while your opponent's defense tires and your defense enjoys rest. As we extend this the logic underpinning this axiom, if your offense is on the field longer and your opponent's defense is tired, your team is probably going to score more points. In fact, we see a fairly strong correlation of 0.7078862 between 3rd down conversion rate and Points For (PF) in the 2016 regular season.  This  correlation is buttressed with common sports logic and theory. There is a finite amount of time in an american football game, sixty (60) minutes. If a team converts a high percentage of third downs, that team also benefits from the natural consequence of controlling more of the time during that sixty (60) minutes. Control of this finite variable is another important factor in determining the outcome of a football game.  
+ 
+
+```{r setup, include=FALSE}
+
+
+
+library(readr)
+library(lubridate)
+library(magrittr)
+library(ggplot2)
+library(e1071)
+library(tidyr)
+library(plyr)
+library(dplyr)
+
+```
+#Data
+
+```{r load data}
+pbp_data<-read.csv("NFL Play by Play 2009-2017 (v4).csv")
+colnames(pbp_data)
+dim(pbp_data)
+```
+
+
+
+```{r 3rd downs only}
+#create a 3rd down data set
+pbp_3rd_down<-subset(pbp_data, down == 3)
+dim(pbp_3rd_down)
+
+pbp_3rd_down$rid <- seq.int(nrow(pbp_3rd_down))
+
+
+#limit the size of the data set to variables likley to use. Criteria is pre-snap information known to the offense. The goal of the model is to use the offensive playcall to predict whether the 3rd down play will result in a 1st down. Some variables are only included or created to create calculated fields.  FirstDown will be our response variable
+
+pbp_3rd_down<-dplyr::select(pbp_3rd_down,rid,GameID,TimeSecs,ydstogo,RushAttempt, PassAttempt,AirYards, FirstDown,posteam,DefensiveTeam,PlayAttempted,PassLocation,Receiver,Passer,Rusher,RunLocation,AbsScoreDiff,HomeTeam,AwayTeam,posteam_timeouts_pre,Field_Goal_Prob,Season)
+dim(pbp_3rd_down)
+```
+
+
+```{r,ECHO=TRUE}
+
+
+pbp_3rd_down$yactogain<-pbp_3rd_down$AirYards-pbp_3rd_down$ydstogo
+#if there are negative numbers then pass is short of yerd to gain. this could be helpful to predict response and inform playcalling. 
+
+ggplot(data=pbp_3rd_down,mapping = aes(x=yactogain)) + geom_freqpoly(mapping = aes(color = as.factor(FirstDown)),binwidth=1,na.rm=TRUE)
+
+ggplot(data=pbp_3rd_down,mapping = aes(x=ydstogo)) + geom_freqpoly(mapping = aes(color = as.factor(FirstDown)),binwidth=1,na.rm=TRUE)
+
+
+```
+
+The histogram's distribution implies that throwing the ball short of the marker skews towards not gaining the 1st down, while throwing the ball at or beyond the marker is more evenly distributed regarding acheiving the line to gain. This could help predict the negative value of our response variable. 
+
+
+Before we start exploring the data and preparing it for modeling. We have to clean fix some errors within the data set. One of this issues is that 2 teams (chargers and rams) moved cities, but are annotated in multiple ways in the data set. We have to normalize the team names for both the offensive and defensive team fields. Additioanlly Jacksonville is annoted as JAC and JAX. We have to fix this as well. 
+
+
+```{r team fix}
+
+#idetntify all the offensive team abbrevations to ensure they are correct
+levels(pbp_3rd_down$posteam)
+# Normalize Jacksonville, Chargers, and Rams
+levels(pbp_3rd_down$posteam)[levels(pbp_3rd_down$posteam)=="JAC"]<- "JAX"
+levels(pbp_3rd_down$posteam)[levels(pbp_3rd_down$posteam)=="STL"]<- "LA"
+levels(pbp_3rd_down$posteam)[levels(pbp_3rd_down$posteam)=="SD"]<- "LAC"
+levels(pbp_3rd_down$DefensiveTeam)[levels(pbp_3rd_down$DefensiveTeam)=="JAC"]<- "JAX"
+levels(pbp_3rd_down$DefensiveTeam)[levels(pbp_3rd_down$DefensiveTeam)=="STL"]<- "LA"
+levels(pbp_3rd_down$DefensiveTeam)[levels(pbp_3rd_down$DefensiveTeam)=="SD"]<- "LAC"
+
+levels(pbp_3rd_down$HomeTeam)[levels(pbp_3rd_down$HomeTeam)=="JAC"]<- "JAX"
+levels(pbp_3rd_down$HomeTeam)[levels(pbp_3rd_down$HomeTeam)=="STL"]<- "LA"
+levels(pbp_3rd_down$HomeTeam)[levels(pbp_3rd_down$HomeTeam)=="SD"]<- "LAC"
+levels(pbp_3rd_down$AwayTeam)[levels(pbp_3rd_down$AwayTeam)=="JAC"]<- "JAX"
+levels(pbp_3rd_down$AwayTeam)[levels(pbp_3rd_down$AwayTeam)=="STL"]<- "LA"
+levels(pbp_3rd_down$AwayTeam)[levels(pbp_3rd_down$AwayTeam)=="SD"]<- "LAC"
+
+
+levels(pbp_3rd_down$posteam)
+levels(pbp_3rd_down$DefensiveTeam)
+levels(pbp_3rd_down$HomeTeam)
+levels(pbp_3rd_down$DefensiveTeam)
+
+##drop unused factor level in posteam first 
+pbp_3rd_down$posteam<-droplevels(pbp_3rd_down$posteam, exclude = if(anyNA(levels(pbp_3rd_down$posteam))) NULL else NA)
+levels(pbp_3rd_down$posteam)
+
+```
+
+```{r,ECHO=TRUE}
+
+ggplot(data=pbp_3rd_down,mapping = aes(x=ydstogo)) + geom_freqpoly(mapping = aes(color =posteam),binwidth=1)
+
+ggplot(data=pbp_3rd_down, mapping = aes(x=ydstogo)) + geom_freqpoly(mapping = aes(color =as.factor(FirstDown)),binwidth=1)
+
+
+
+```
+
+Before we continue with data cleaning and prep lets print out an easy simple graph to show the number of total first downs for each team. We will create a seperate data frame for the visualization 
+```{r total 1st Downs Per Seasons}
+
+totalFirst = filter(pbp_3rd_down,FirstDown=="1")
+
+```
+
+```{r horizontal bar chart, ECHO=TRUE}
+#Number of 3rd down conversions per Team by Season
+totalFirst$Season<-as.factor(totalFirst$Season)
+ggplot(totalFirst, aes(x=posteam, fill=Season)) + geom_bar() + coord_flip() + labs(x= "Offensive Team", y="3rd Down Conversions") + guides(fill = guide_legend(reverse = TRUE))
+
+```
+
+```{r,ECHO=TRUE}
+
+#Number of 3rd and long situations per Team 
+
+pbp_3rd_down %>%dplyr::filter(ydstogo >6)%>%filter(!is.na(posteam))%>%
+  ggplot(mapping = aes(x=posteam,fill=posteam)) +  geom_bar() + coord_flip() + labs(x= "Offensive Team", y="Number of 3rd and Longs (>6yrds)")
+
+
+
+#TOP 25 receivers targeted on 3rd and long per season
+
+pbp_3rd_down$Season<-as.factor(pbp_3rd_down$Season)
+pbp_3rd_down %>%dplyr::filter(ydstogo >6)%>%filter(!is.na(Receiver)) %>%dplyr::count(Receiver,Season)%>%dplyr::top_n(20)%>%
+  ggplot(mapping = aes(x=Season, y=Receiver,fill=n)) + geom_raster(hjust = 0, vjust = 0) + (theme(axis.text.y = element_text(lineheight = .5
+                                   , size = 7)))
+
+
+#Top 50 receivers targeted on 3rd down by PassLocation
+pbp_3rd_down %>%dplyr::filter(ydstogo >6)%>%filter(!is.na(Receiver)) %>%filter(!is.na(PassLocation))%>%dplyr::count(Receiver,PassLocation)%>%dplyr::top_n(50)%>%
+  ggplot(mapping = aes(x=PassLocation, y=Receiver,fill=n)) + geom_raster(hjust = 0, vjust = 0) + (theme(axis.text.y = element_text(lineheight = .5
+                                   , size = 7)))
+
+
+#Top 25 Reveiver targets by QB
+
+pbp_3rd_down %>%dplyr::filter(ydstogo >6)%>%filter(!is.na(Receiver))%>%filter(!is.na(Passer)) %>%dplyr::count(Receiver,Passer)%>% dplyr::top_n(25)%>%
+  ggplot(mapping = aes(x=Passer, y=Receiver,fill=n)) + geom_raster(hjust = 0, vjust = 0) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+Phillip Rivers spreads the ball around , but Antonio Gates has been his favorite receiver on 3rd down. Despite high numbers for Rivers across 3 receivers the Chargers have not faced an atypical number of 3rd and long situations.  Interesing that Danny Amendola cracks the top 50 with number of targets over the middle. Maybe this is a result of lining upin the slot?
+
+```{r, passConversionHeatMap, echo=TRUE}
+#data for heat map will require manipulation
+heat.data<-pbp_3rd_down
+
+#Create a dataframe of frequency counts for passing conversion by Location and Yards to Go
+pass.conversion<-plyr::count(heat.data,c("FirstDown","PassLocation","ydstogo"))
+#remove NA
+pass.conversion<-na.omit(pass.conversion)
+pass.conversion
+
+totals<-aggregate(pass.conversion$freq, by=list(Category=pass.conversion$PassLocation,pass.conversion$ydstogo), FUN=sum)
+colnames(totals)<-c("PassLocation","ydstogo", "Sum")
+totals
+#merge the dataframes to get location totals back into the main dataframe
+pass.conversion<-merge(pass.conversion,totals, by=c("PassLocation","ydstogo"))
+pass.conversion
+#create a percentage field to determine percentage of Success or Failure by PassLocation and Yards to Go
+pass.conversion$ConversionPct<-pass.conversion$freq/pass.conversion$Sum
+
+###HEAT MAP CREATED FROM BY % OF ATTEMPS SUCCESSFUL BY PASSLOCATION PER YARDS TO GO
+pass.1stDown<-subset(pass.conversion, FirstDown==1)
+pass.1stDown<-pass.1stDown[c("PassLocation", "ydstogo", "freq","ConversionPct")]
+
+
+
+####Create Heat Map for 1st Down Conversion Success
+p <- ggplot(pass.1stDown, aes(ydstogo, PassLocation)) + geom_tile(aes(fill = ConversionPct),colour = "grey") + scale_fill_gradient(low = "white", high = "green")
+p
+
+
+```
+- Fairly equal distribution of success/failure across the field, except at longer distances. Clearly more success on 3rd down when teams pass the ball in the middle of the field at distances greater than 6 yards relative to Left and Right Pass Locations. Therefore, on 3rd and long (> 6yds) teams should pass the ball in the middle of the field to maximize their chance for a 1st down conversion. Can anyone say GRONK?!
+
+Let's query the 3rd down dataset to identify what receiver has caught the most passes in the middle on 3rd and long. My guess, has to be a tight end, right?
+
+```{r, possesionReceiver}
+middle.pass.conversions<-pbp_3rd_down[which(pbp_3rd_down$FirstDown==1 & pbp_3rd_down$PassLocation=="middle" & pbp_3rd_down$ydstogo >=6),]
+receiverList<-middle.pass.conversions[c("Receiver")]
+conversion.counts<-plyr::count(receiverList,"Receiver")
+conversion.counts<-na.omit(conversion.counts)
+conversion.counts
+possession.receiver=which.max(conversion.counts$freq)
+conversion.counts[possession.receiver,]
+```
+- Looks like I was right, Antonio Gates of the Los Angeles Chargers. 33 1st down receptions on 3rd Down and long over the middle in the last 9 seasons. Not a surpirse given the heat maps above.
+
+We should see Phillip Rivers as the QB with the most 3rd and long conversions over the middle. If not, Antiono Gates' has special value to the Chargers on 3rd down. 
+```{r,QB}
+passerList<-middle.pass.conversions[c("Passer")]
+conversion.counts<-plyr::count(passerList,"Passer")
+conversion.counts<-na.omit(conversion.counts)
+conversion.counts
+possession.qb=which.max(conversion.counts$freq)
+conversion.counts[possession.qb,]
+```
+Wow! Joe Flacco?! Often maligned, but sucess on 3rd and long over the middle. Maybe the lack of running game puts the Ravens in these situations? Either way, Flacco bails out the Ravens is extending drives without great receivers and a terriable running game.  Indeed, our bar graph above shows BAL as one of the teams most frequently facing 3rd and long. No surprise Flacco is ranked #1 in conversions given the amount of opporunities. GET THS GUY A RUNNING GAME!
+
+ 
+```{r, runConversionHeatMap, echo=TRUE}
+#Create a dataframe of frequency counts for run conversion by Location and Yards to Go
+run.conversion<-plyr::count(heat.data,c("FirstDown","RunLocation","ydstogo"))
+#remove NA
+run.conversion<-na.omit(run.conversion)
+run.conversion
+
+totals<-aggregate(run.conversion$freq, by=list(Category=run.conversion$RunLocation,run.conversion$ydstogo), FUN=sum)
+colnames(totals)<-c("RunLocation","ydstogo", "Sum")
+totals
+#merge the dataframes to get location totals back into the main dataframe
+run.conversion<-merge(run.conversion,totals, by=c("RunLocation","ydstogo"))
+run.conversion
+#create a percentage field to determine percentage of Success or Failure by RunLocation and Yards to Go
+run.conversion$ConversionPct<-run.conversion$freq/run.conversion$Sum
+
+###HEAT MAP CREATED FROM BY % OF ATTEMPTS SUCCESSFUL BY RUNLOCATION PER YARDS TO GO
+run.1stDown<-subset(run.conversion, FirstDown==1)
+run.1stDown<-run.1stDown[c("RunLocation", "ydstogo", "ConversionPct")]
+run.1stDown
+####Create Heat Map for 1st Down Conversion Success
+ru <- ggplot(run.1stDown, aes(ydstogo, RunLocation)) + geom_tile(aes(fill = ConversionPct),colour = "grey") + scale_fill_gradient(low = "white", high = "blue")
+RU
+```
+- Best chance to convert a 1st down on 3rd and 1?  Run the ball up the middle!
+- Best chance to convert a 1st down on 3rd and medium-long on the ground? Run the ball on th edge.
+
+Similar to the above, let's see what player has the most 3rd down conversions on 3rd and 1. My guess, a QB since this is a geat situation for a QB sneak. 
+
+```{r, 3rd and short}
+middle.run.conversions<-pbp_3rd_down[which(pbp_3rd_down$FirstDown==1 & pbp_3rd_down$RunLocation=="middle" & pbp_3rd_down$ydstogo <= 1),]
+rusherList<-middle.run.conversions[c("Rusher")]
+conversion.counts<-plyr::count(rusherList,"Rusher")
+conversion.counts<-na.omit(conversion.counts)
+conversion.counts
+possession.runner=which.max(conversion.counts$freq)
+conversion.counts[possession.runner,]
+```
+Wow, this makes perfect sense! Cam Newton is big and physical. The perfect option for this scenario. 
+
+##More Data Prep
+We could explore this data set for but the goal of this notebook is to predict the outcome of a 3rd down play. Let's continue cleaning, transforming and augmenting the play by play dataset. 
+
+```{r, more data prep}
+#ensure a pass or run was attempted
+pbp_3rd_down.prep <- subset(pbp_3rd_down, PlayAttempted==1)
+dim(pbp_3rd_down.prep)
+
+pbp_3rd_down.prep <- subset(pbp_3rd_down, (PassAttempt==1 | RushAttempt==1))
+dim(pbp_3rd_down.prep)
+
+#add unique gameid for each offensive team
+pbp_3rd_down.prep$offteamgameid<-paste0(pbp_3rd_down.prep$posteam,pbp_3rd_down.prep$GameID)
+
+#add unique gameid for each defensieve team
+pbp_3rd_down.prep$defteamgameid<-paste0(pbp_3rd_down.prep$DefensiveTeam,pbp_3rd_down.prep$GameID)
+
+head(pbp_3rd_down.prep,50)
+```
+
+Data Prep continues. We are going to look at the distribution of ydstogo. We should only include more realsitic scenarios and remove outliers from the data for this particular variable. So 3rd and 30 should not be part of the training or test set. These outliers could effect the model results.
+
+
+```{r,ydstogo, ECHO=TRUE}
+hist(pbp_3rd_down.prep$ydstogo)
+pbp_3rd_down.prep<-pbp_3rd_down.prep[which(pbp_3rd_down.prep$ydstogo <= 15),]
+hist(pbp_3rd_down.prep$ydstogo)
+dim(pbp_3rd_down.prep)
+```
+
+```{r}
+pbp_3rd_down.prep<-pbp_3rd_down.prep%>%mutate(yrdgroup = if_else(ydstogo<=3,"0to3",if_else(ydstogo > 3 & ydstogo <= 6,"4to6",if_else(ydstogo > 6 ,"7to15","missing"))))
+
+head(pbp_3rd_down.prep,20)
+
+```
+
+
+
+```{r, create dummy variables for distance and location}
+# We use these variables to track tendencies.
+pbp_3rd_down.prep<-pbp_3rd_down.prep%>%mutate(left = if_else(RunLocation=="left"| PassLocation=="left",1,0))
+pbp_3rd_down.prep<-pbp_3rd_down.prep%>%mutate(right = if_else(RunLocation=="right" | PassLocation=="right",1,0))
+pbp_3rd_down.prep<-pbp_3rd_down.prep%>%mutate(middle = if_else(RunLocation=="middle" | PassLocation=="middle",1,0))
+
+pbp_3rd_down.prep[is.na(pbp_3rd_down.prep)] <- 0
+pbp_3rd_down.prep<-pbp_3rd_down.prep %>% dplyr::select(-c(Passer,Receiver,Rusher,PlayAttempted,AirYards))
+
+
+```
+
+```{r}
+
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep
+#detach("package:plyr", unload=TRUE) 
+#We greate a plya Id to we can start to track playcalling rates within a game and over the course of a season
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag %>% arrange(offteamgameid)%>%group_by(offteamgameid) %>% mutate(ingameplayid = 1:n())
+
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag %>% arrange(offteamgameid)%>%group_by(offteamgameid,yrdgroup) %>% mutate(ingameplayid_distance = 1:n())
+
+
+
+```
+
+
+```{r}
+
+
+#replace NAs with 0 so you can do math. This should not impact the rest of the analysis
+pbp_3rd_down.prep.lag[is.na(pbp_3rd_down.prep.lag)] <- 0
+
+
+#For each yrd group (distance) calculates cumulative playcalling rate per game by method (run or pass) and Location (right, left, middle)  
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamgameid,ingameplayid)%>%group_by(offteamgameid,yrdgroup)  %>% mutate(ingamePass_Rate = (cumsum(PassAttempt) / ingameplayid_distance))
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamgameid,ingameplayid)%>%group_by(offteamgameid,yrdgroup)  %>% mutate(ingameRun_Rate = (cumsum(RushAttempt) / ingameplayid_distance ))
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamgameid)%>%group_by(offteamgameid,yrdgroup)  %>% mutate(ingameLeftRate= (cumsum(left) / ingameplayid_distance ))
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamgameid,ingameplayid)%>%group_by(offteamgameid,yrdgroup) %>% mutate(ingameRightRate = (cumsum(right) / ingameplayid_distance ))
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamgameid,ingameplayid)%>%group_by(offteamgameid,yrdgroup)  %>% mutate(ingameMiddleRate = (cumsum(middle) / ingameplayid_distance ))
+
+
+
+```
+
+
+
+```{r}
+
+#create lag variables so we can calculate currnt knowledge of play call rates and tendencies. Current play only has knowledge of playcall tendencies up to the last play. However, offense does have the advantage of knowing what play it is going to call for the current play. Lag variables are crucial to serve as proxy of defensive knowledge of offensive strategy 
+pbp_3rd_down.prep.lag[is.na(pbp_3rd_down.prep.lag)] <- 0
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag %>% dplyr::arrange(offteamgameid,ingameplayid) %>%
+  group_by(offteamgameid) %>%
+  mutate(PassPrevPlay = lag(PassAttempt,1),
+         RunPrevPlay = lag(RushAttempt,1),
+         MiddlePrevPlay = lag(middle,1),
+         RightPrevPlay = lag(right,1),
+         LeftPrevPlay = lag(left,1))
+
+
+
+```
+
+
+
+
+
+```{r, In-game 3rd down tendency knowledge}
+# create a lag variable for the ingame tendency rates for pass and run locations by distance 
+
+require(dplyr)
+pbp_3rd_down.prep.lag[is.na(pbp_3rd_down.prep.lag)] <- 0
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag %>% dplyr::arrange(offteamgameid) %>%
+  group_by(offteamgameid) %>%
+  mutate(ingamePassTendency = lag(ingamePass_Rate,1),
+         ingameRunTendency = lag(ingameRun_Rate,1),
+          ingame_Middle_Tendency = lag(ingameMiddleRate,1),
+         ingame_Right_Tendency = lag(ingameRightRate,1),
+         ingame_Left_Tendency = lag(ingameLeftRate,1))
+
+
+
+```
+
+```{r, Season Offensive 3rd down tendency variables}
+#create a unique season variable for each post team
+pbp_3rd_down.prep.lag$offteamseasonid<-paste(pbp_3rd_down.prep.lag$posteam,pbp_3rd_down.prep.lag$Season, sep = "")
+#create a variable for play per season
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag %>% group_by(offteamseasonid) %>% mutate(seasonoffplayid = 1:n())
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag %>% group_by(offteamseasonid,yrdgroup) %>% mutate(seasonoffplayid_distance = 1:n())
+
+
+#calculate call playing rates/tendency of 3rd passing by distance for each season
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamseasonid,seasonoffplayid)%>%group_by(offteamseasonid,yrdgroup)  %>% mutate(seasonPassRate = (cumsum(PassAttempt) / seasonoffplayid_distance ))
+
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamseasonid,seasonoffplayid)%>%group_by(offteamseasonid,yrdgroup)  %>% mutate(seasonRunRate = (cumsum(RushAttempt) / seasonoffplayid_distance))
+
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamseasonid,seasonoffplayid)%>%group_by(offteamseasonid,yrdgroup)  %>% mutate(season_Left_Rate= (cumsum(left) / seasonoffplayid_distance ))
+
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamseasonid,seasonoffplayid)%>%group_by(offteamseasonid,yrdgroup)  %>% mutate(season_Right_Rate = (cumsum(right) / seasonoffplayid_distance ))
+
+pbp_3rd_down.prep.lag<- pbp_3rd_down.prep.lag %>% arrange(offteamseasonid,seasonoffplayid)%>%group_by(offteamseasonid,yrdgroup)  %>% mutate(season_Middle_Rate = (cumsum(middle) / seasonoffplayid_distance))
+
+
+
+```
+
+```{r, tendency variables}
+pbp_3rd_down.prep.lag[is.na(pbp_3rd_down.prep.lag)] <- 0
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag %>% dplyr::arrange(offteamseasonid,seasonoffplayid) %>%
+  group_by(offteamseasonid) %>%
+  mutate(seasonPassTendency = lag(seasonPassRate,1),
+         seasonRunTendency = lag(seasonRunRate,1),
+          season_Middle_Tendency = lag(season_Middle_Rate,1),
+         season_Right_Tendency = lag(season_Right_Rate,1),
+         season_Left_Tendency = lag(season_Left_Rate,1))
+
+```
+
+
+```{r,game and season playcalling variation,ECHO=TRUE}
+#season cumulative variability over time . Lower numbers are preffered. 
+
+seasontendencyVars_method<-pbp_3rd_down.prep.lag %>% ungroup()%>%       
+                dplyr::select(starts_with("season")) %>% dplyr::select(ends_with("Tendency"))%>% dplyr::select(-contains("_"))
+
+seasontendencyVars_location<-pbp_3rd_down.prep.lag %>% ungroup()%>%       
+                dplyr::select(starts_with("season")) %>% dplyr::select(ends_with("Tendency"))%>% dplyr::select(contains("_"))
+
+
+library(matrixStats)
+pbp_3rd_down.prep.lag$SeasonTotalVarMethod<-apply(seasontendencyVars_method[1:2], 1, sd)
+pbp_3rd_down.prep.lag$SeasonTotalVarLocation<-apply(seasontendencyVars_location[1:3], 1, sd)
+
+#game cumulative variability over time 
+ingametendencyVars_method<-pbp_3rd_down.prep.lag %>% ungroup()%>%       
+                dplyr::select(starts_with("ingame")) %>% dplyr::select(ends_with("Tendency"))%>% dplyr::select(-contains("_"))
+
+ingametendencyVars_location<-pbp_3rd_down.prep.lag %>% ungroup()%>%       
+                dplyr::select(starts_with("ingame")) %>% dplyr::select(ends_with("Tendency"))%>% dplyr::select(contains("_"))
+
+pbp_3rd_down.prep.lag$ingameTotalVarMethod<-apply(ingametendencyVars_method[1:2], 1, sd)
+pbp_3rd_down.prep.lag$ingameTotalVarLocation<-apply(ingametendencyVars_location[1:3], 1, sd)
+```
+
+
+
+Data visualizations of playcalling trends per team
+
+```{r,game and season playcalling trend da}
+
+rateCol<-pbp_3rd_down.prep.lag%>%ungroup()%>%select(starts_with("season"))%>%select(ends_with("Rate"))
+rateCol<-names(rateCol)
+
+
+playcalling<-pbp_3rd_down.prep.lag%>%ungroup()%>%arrange(Season,offteamseasonid,posteam,seasonoffplayid)%>%dplyr::select(rid,Season,offteamseasonid,posteam,seasonoffplayid,offteamgameid,yrdgroup,PassAttempt, PassLocation,RunLocation, one_of(rateCol))
+head(playcalling,10)
+
+#need to use %in% instead of "==" becasue of the NAs in the columns
+playcalling<-playcalling%>%mutate(playlocation = ifelse(PassLocation %in%"left" | RunLocation %in%"left","left", ifelse(PassLocation %in% "middle" | RunLocation %in% "middle","middle","right")))
+playcalling$playtype<-as.factor(playcalling$PassAttempt)
+levels(playcalling$playtype)
+levels(playcalling$playtype) <- c("run","pass")
+levels(playcalling$playtype)
+
+playcalling<-playcalling%>%arrange(Season,offteamseasonid,posteam,seasonoffplayid)%>%dplyr::select(rid,Season,offteamseasonid,posteam,seasonoffplayid,offteamgameid,yrdgroup,playlocation, playtype, one_of(rateCol))
+#variance per team by game
+seasonEnd<-playcalling%>%group_by(offteamseasonid,Season,posteam,yrdgroup)%>%dplyr::summarize(EndseasonPassRate = last(seasonPassRate),EndseasonRunRate = last(seasonRunRate),Endseason_Left_Rate = last(season_Left_Rate),
+                                                                     Endseason_Right_Rate = last(season_Right_Rate),Endseason_Middle_Rate = last(season_Middle_Rate))
+
+head(seasonEnd,20)
+
+
+
+library(reshape)
+playtrends<-melt(data.frame(seasonEnd),id=c("offteamseasonid","Season","posteam","yrdgroup"))
+head(playtrends,30)
+
+
+```
+
+```{r,season playcalling trend plots,ECHO=TRUE}
+
+x<-levels(playcalling$posteam)
+x
+teams<-vector("list",length(x))
+names(teams)<-names(x)
+
+for(i in unique(x)){
+  
+  type<-playtrends%>%filter(variable=="EndseasonPassRate" | variable=="EndseasonRunRate" )%>%filter(posteam==i)%>%ggplot(mapping = aes(x = Season,y=value,color=variable)) + labs(title = paste0(i," 3rd Down Playcalling Trends by Type"),x="Season",y="3rd Down Playcalling Rates") + geom_point(size=3) + geom_line(mapping = aes(group=Season),size=1,color="black") + facet_wrap(~yrdgroup,labeller = label_both) + theme(axis.text.x = element_text(angle = 90)) + ylim(0,1) 
+  
+  
+  print(type)
+  
+  
+}
+
+```
+
+
+```{r}
+
+for(i in unique(x)){
+
+  
+  direction<-playtrends%>%filter(variable=="Endseason_Left_Rate" | variable=="Endseason_Right_Rate" | variable=="Endseason_Middle_Rate")%>%filter(posteam==i)%>%ggplot(mapping = aes(x = Season,y=value,color=variable)) + labs(title = paste0(i," 3rd Down Playcalling Trends by Type"),x="Season",y="3rd Down Playcalling Rates") + geom_point(size=3) + geom_line(mapping = aes(group=Season),size=1,color="black") + facet_wrap(~yrdgroup,labeller = label_both) + theme(axis.text.x = element_text(angle = 90)) + ylim(0,1) 
+  
+  
+  print(direction)
+  
+  
+}
+
+```
+
+
+
+```{r,Simpleified Same Play as Last PLAY}
+#CREATE ONE FIELD THAT DETERMINES IF PLAY CALLED IS THE SAME AS PREVIOUS PLAY REGARDLESS OF PASS OR RUN AND DISTANCE
+
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag%>%mutate(repeatPlay=if_else(((PassAttempt+PassPrevPlay)==2 | (RushAttempt+RunPrevPlay)==2) & (left+LeftPrevPlay)==2 | (right+RightPrevPlay)==2 | (middle+MiddlePrevPlay)==2,1,0))
+                                                                                                           
+
+
+```
+
+```{r,calculate defensive statistis,ECHO=TRUE}
+# INGAME 3RD DOWN DEF SUCCESS
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag%>%group_by(defteamgameid) %>% arrange(defteamgameid,ingameplayid) %>% mutate(ingame3rdowndef= lag(((1- cumsum(FirstDown) / ingameplayid)),1))
+
+
+# INSEASON 3RD DOWN DEF SUCCESS
+pbp_3rd_down.prep.lag$defteamseasonid<-paste(pbp_3rd_down.prep.lag$DefensiveTeam,pbp_3rd_down.prep.lag$Season, sep = "")
+
+#create a variable for defensive play per season
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag %>% group_by(defteamseasonid) %>% mutate(seasondefplayid = 1:n())
+
+#calculate defensive success rate on 3rd down for each team by season
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag%>%group_by(defteamseasonid) %>% arrange(defteamseasonid,defteamgameid, seasondefplayid) %>% mutate(season3rdowndef= lag(((1- cumsum(FirstDown) / seasondefplayid)),1))
+
+
+# SAME STATS FOR OFFENSE Season
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag%>%group_by(offteamseasonid) %>% arrange(offteamseasonid,offteamgameid, seasonoffplayid) %>% mutate(season3rdownoff= lag(((cumsum(FirstDown) / seasonoffplayid)),1))
+
+#Is offense the home team
+#create variable
+pbp_3rd_down.prep.lag$offhometeam<-ifelse(pbp_3rd_down.prep.lag$posteam==pbp_3rd_down.prep.lag$HomeTeam,1,0)
+
+
+
+ggplot(data=pbp_3rd_down.prep.lag, mapping = aes(x=as.factor(FirstDown))) + geom_bar(mapping = aes(fill=as.factor(offhometeam))) + 
+  labs(x = "FirstDown") + scale_fill_discrete(name="Offense Home Team")
+###########End of Data Processing####################################################
+
+
+##########Additional EDA###############################################################
+#Defense vs offense (higher scores mean defensive is much better than offense. Close
+# to 0 or negative means the offensive is better)
+
+pbp_3rd_down.prep.lag<-pbp_3rd_down.prep.lag%>%group_by(defteamseasonid) %>% arrange(defteamseasonid,defteamgameid, seasondefplayid) %>% mutate(third_def_v_off = season3rdowndef - season3rdownoff)
+
+#end of game season cumulative of Def v O 3rd down success/failure spread
+
+mismatch<-pbp_3rd_down.prep.lag%>%group_by(Season,offteamseasonid,offteamgameid,defteamgameid)%>%summarize(D_vs_O = last(third_def_v_off))
+#create game number per team by season
+mismatch<-mismatch%>%group_by(offteamseasonid)%>%mutate(game_num=1:n())
+#remove game 1-3 for each team per season. Games 1-5 do not have enough time for any trend for offense or defense succes/failure to take hold
+mismatch<-mismatch%>%filter(game_num>5)
+
+#biggest mismatch of 3rd down defense vs offense per seaoson
+D_domination<-mismatch%>%group_by(Season)%>%summarise(D_vs_O = max(D_vs_O))
+D_domination%>%inner_join(mismatch,D_domination, by = c("Season", "D_vs_O"))
+pbp_3rd_down.prep.lag%>%filter(defteamgameid=="MIN2015110800")%>%group_by(defteamgameid)%>%summarise(last(season3rdowndef))
+
+#lets calculate the same for the offense. The closer to 0 the more even the macth up. any negative number means the offense success rate is better 
+#than defensive 3rd stop rate
+
+O_domination<-mismatch%>%group_by(Season)%>%summarise(D_vs_O = min(D_vs_O))
+O_domination%>%inner_join(mismatch,O_domination, by = c("Season", "D_vs_O"))
+pbp_3rd_down.prep.lag%>%filter(offteamgameid=="DAL2014101211")%>%group_by(offteamgameid)%>%summarise(last(season3rdownoff))
+#Wow Dallas had quite an impressive success rate on third down in 2014 up to that point!
+####################END PROCESSING AND EDA############################
+
+```
+
+#Modeling
+
+All the variables included represent pre-snap information known to the offense. The objecive of the model is to predict the success/failure of a 3rd down play call given the ariables below. The model would be used by the offensive playcaller.
+The below is a small description of what each variable represents
+
+GameId - Unique ID for each game (not in model)
+
+Season - Season YYYY (not in model)
+
+TimeSecs - Seconds left in the game
+
+yrdgroup --will create dummy variables - 3 categoris to bin yrdstogo
+
+AbsScoreDif - Absolute difference in score between the two teams
+
+PassAttempt - Playcall by the offense Binary (1= Pass, 0=Run)
+
+left - Offensive Playcall designed to left of field (yes=1, 0=no)
+
+right - Offensive Playcall designed to right of field (yes=1, 0=no)
+
+yactogain - difference between distance ball thrown and the line to gain for a first down
+
+offhometeam - offense is home team (binary)
+
+third_def_v_off - difference between Defensive team 3rd down success rate (preventing offense from getting first down) and Offensive team 3rd down success rate (getting first down) calculated cumulativley for each team by season
+
+ingame3rdowndef -Defensive team 3rd down success rate (preventing offense from getting first down calculated cumulatively per game 
+
+posteam_timeouts_pre - offensive timeouts remaining pre-snap
+
+Field_Goal_Prob - prbability of offense making a field goal from current yrdline
+
+repeatPlay - offense calls same play as preceding 3rd down play (binary)
+
+ingameTotalVarmethod - variance of pass vs run play calls in a game by yrdgroup category
+
+ingameTotalVarLocation - variance of left,right,middle play calls in a game by yrdgroup category
+
+seasonotaVarLocation -variance of left,right,middle play calls in a game by yrdgroup category cumulative across the season
+
+seasonTotalVarmethod - variance of pass vs run play calls in a game by yrdgroup categorycumulative across the season 
+
+FirstDown - response variable (binary). Offensive play earned frist down
+
+
+```{r, Reduce the dataset for modeling}
+
+pbp_3rd_down.prep.lag[21]
+pbp_3rd_down.prep.lag$yrdgroup.4to6=ifelse(pbp_3rd_down.prep.lag$yrdgroup=="4to6",1,0)
+pbp_3rd_down.prep.lag$yrdgroup.7to15=ifelse(pbp_3rd_down.prep.lag$yrdgroup=="7to15",1,0)
+pbp_3rd_down.prep.lag$yactogain=ifelse(pbp_3rd_down.prep.lag$RushAttempt==1,0,pbp_3rd_down.prep.lag$yactogain)
+pbp_3rd_down.prep.lag$Season = as.numeric(as.character(pbp_3rd_down.prep.lag$Season ))
+
+final.data<-pbp_3rd_down.prep.lag%>%arrange(GameID)%>%ungroup()%>%filter(!ingameplayid==1) %>% dplyr::select(rid,GameID,Season,TimeSecs,yrdgroup.4to6,yrdgroup.7to15, yactogain, PassAttempt,left,right, AbsScoreDiff,offhometeam,third_def_v_off,ingame3rdowndef,posteam_timeouts_pre, Field_Goal_Prob,ingameTotalVarMethod,ingameTotalVarLocation,SeasonTotalVarMethod,SeasonTotalVarLocation, repeatPlay,FirstDown)
+
+
+
+
+
+
+head(final.data,10)
+
+```
+
+
+```{r,load packages}
+library(caret)
+library(glmnet)
+library(pROC)
+```
+
+```{r}
+#convert from tibble to dataframe
+final.data<-data.frame(final.data)
+#transform response into a factor
+final.data$FirstDown<-as.factor(final.data$FirstDown)
+levels(final.data$FirstDown)
+prop.table(summary(final.data$FirstDown))
+#split into training and test dataset. We will use previous seasons to predict future
+train.data<-subset(final.data,Season >= 2009 & Season <=2014)[,4:22]
+test.data<-subset(final.data,Season > 2014)[,4:22]
+#outputclass
+FirstDown.train<-train.data$FirstDown
+FirstDown.test<-test.data$FirstDown
+
+
+```
+
+
+```{r}
+
+#Logistic Regression model (intial)
+
+lr1=glm(FirstDown~. , data=train.data ,family=binomial)
+
+summary(lr1)
+
+#training diagnostics 
+
+lr1.probs=predict(lr1,type="response")
+lr1.pred=ifelse(lr1.probs>=.5,1,0)
+head(lr1.pred,100)
+
+lr1.pred<-as.numeric(lr1.pred)
+
+library(pROC)
+auc <- roc(FirstDown.train, lr1.pred)
+print(auc)
+plot(auc, ylim=c(0,1), print.thres=TRUE, main=paste('AUC:',round(auc$auc[[1]],2)))
+abline(h=1,col='blue',lwd=2)
+abline(h=0,col='red',lwd=2)
+
+actual = as.factor(FirstDown.train)
+
+predicted = as.factor(lr1.pred)
+
+confusionMatrix(predicted,actual, positive = "1")
+
+##Model performs poorly , especially on the positve value of the output class. Lets try to sue SMOTE to oversmaple the minority class and undersample the majority class
+```
+
+```{r,SMOTE,echo=TRUE}
+library(DMwR)
+train.SMOTE <- DMwR::SMOTE(FirstDown~., train.data, perc.over = 50, perc.under=200)
+prop.table(table(train.SMOTE$FirstDown))
+#50/50
+train.SMOTE2 <- DMwR::SMOTE(FirstDown~., train.data, perc.over = 100, perc.under=200)
+prop.table(table(train.SMOTE2$FirstDown))
+
+
+#Logistic Regression model (intial)
+
+lr1.smote=glm(FirstDown~. , data=train.SMOTE2 ,family=binomial)
+
+summary(lr1.smote)
+
+#training diagnostics 
+
+lr1.smote.probs=predict(lr1.smote,type="response")
+lr1.smote.pred=ifelse(lr1.smote.probs>=.5,1,0)
+head(lr1.smote.pred,100)
+
+lr1.smote.pred<-as.numeric(lr1.smote.pred)
+
+library(pROC)
+auc <- roc(train.SMOTE2$FirstDown, lr1.smote.pred)
+print(auc)
+plot(auc, ylim=c(0,1), print.thres=TRUE, main=paste('AUC:',round(auc$auc[[1]],2)))
+abline(h=1,col='blue',lwd=2)
+abline(h=0,col='red',lwd=2)
+
+actual = as.factor(train.SMOTE2$FirstDown)
+
+predicted = as.factor(lr1.smote.pred)
+
+confusionMatrix(predicted,actual, positive = "1")
+
+
+
+
+```
+
+```{r,stepwise SMOTE,ECHO=TRUE}
+
+#repeat with SMOTE training set 
+
+full.glm<-glm(FirstDown~.,family=binomial,data=train.SMOTE2) 
+null.glm<-glm(FirstDown ~ 1, family=binomial,data=train.SMOTE2) 
+step.glm<-step(null.glm, scope=formula(full.glm), direction="both",trace=F) 
+step.glm
+
+lr1.smote.step.probs=predict(step.glm,test.data,type="response")
+lr1.smote.step.pred=ifelse(lr1.smote.step.probs>=.5,1,0)
+head(lr1.smote.step.pred,100)
+
+lr1.smote.step.pred<-as.numeric(lr1.smote.step.pred)
+
+library(pROC)
+auc <- roc(FirstDown.test, lr1.smote.step.pred)
+print(auc)
+plot(auc, ylim=c(0,1), print.thres=TRUE, main=paste('AUC:',round(auc$auc[[1]],2)))
+abline(h=1,col='blue',lwd=2)
+abline(h=0,col='red',lwd=2)
+
+actual = as.factor(FirstDown.test)
+
+predicted = as.factor(lr1.smote.step.pred)
+
+confusionMatrix(predicted,actual, positive = "1")
+
+
+```
+
+```{r,GBM, ECHO=TRUE}
+
+library(gbm)
+set.seed(1)
+boost.fd.SMOTE=gbm((as.character(FirstDown))~.,data=train.SMOTE  ,distribution="bernoulli",shrinkage = .01, n.trees=20000, interaction.depth=4)
+summary(boost.fd.SMOTE)
+
+
+
+pred.boost=predict.gbm(boost.fd.SMOTE,test.data, n.trees=20000,type = "response")
+#pred.boost
+
+
+#######convert probabiities back to binry scale##############
+predictions<-ifelse(pred.boost>.5,1,0)
+
+
+FirstDown.test<-as.numeric(as.character(test.data$FirstDown))
+
+
+auc <- roc(FirstDown.test, predictions)
+print(auc)
+plot(auc, ylim=c(0,1), print.thres=TRUE, main=paste('AUC:',round(auc$auc[[1]],2)))
+abline(h=1,col='blue',lwd=2)
+abline(h=0,col='red',lwd=2)
+
+actual = as.factor(FirstDown.test)
+
+predicted = as.factor(predictions)
+
+confusionMatrix(predicted,actual, positive = "1")
+
+
+```
+
+
+
+#Conclusion
+
+#|------------END--------------|
+
